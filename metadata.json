@@ -1,0 +1,7 @@
+{
+  "name": "BlinkLocal",
+  "description": "A SaaS-level hyperlocal delivery platform specializing in local vegetable markets and women's shops (Suhag Bhandar), featuring 10-minute delivery and role-specific KPI dashboards.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

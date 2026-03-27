@@ -1,0 +1,187 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required) - Firebase Auth UID
+    //   - name: string (optional)
+    //   - email: string (required, email format)
+    //   - role: string (required, enum: customer, shopkeeper, delivery, admin)
+    //   - address: string (optional)
+    //   - location: map (optional, lat/lng numbers)
+    //   - isActive: bool (optional)
+    //
+    // Collection: shops
+    // Document ID: {shopId}
+    // Fields:
+    //   - id: string (optional)
+    //   - ownerId: string (required) - UID of the shopkeeper
+    //   - name: string (required)
+    //   - category: string (optional)
+    //   - location: map (required, lat/lng numbers)
+    //   - address: string (optional)
+    //   - rating: number (optional)
+    //   - isActive: bool (optional)
+    //   - approved: bool (optional)
+    //
+    // Collection: products (subcollection of shops)
+    // Document ID: {productId}
+    // Fields:
+    //   - id: string (optional)
+    //   - shopId: string (required)
+    //   - name: string (required)
+    //   - category: string (optional)
+    //   - price: number (required, positive)
+    //   - stock: number (required, non-negative)
+    //   - imageUrl: string (optional, uri format)
+    //   - description: string (optional)
+    //
+    // Collection: orders
+    // Document ID: {orderId}
+    // Fields:
+    //   - id: string (optional)
+    //   - customerId: string (required)
+    //   - shopId: string (required)
+    //   - items: list (required, objects with productId, name, price, quantity)
+    //   - status: string (required, enum: pending, accepted, preparing, out_for_delivery, delivered, cancelled)
+    //   - totalAmount: number (required, positive)
+    //   - deliveryFee: number (optional)
+    //   - createdAt: timestamp (required)
+    //   - riderId: string (optional)
+    //   - customerLocation: map (optional, lat/lng numbers)
+    //   - shopLocation: map (optional, lat/lng numbers)
+    //   - riderLocation: map (optional, lat/lng numbers)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == "tarun422rathore@gmail.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    function isShopOwner(shopId) {
+      return isAuthenticated() && get(/databases/$(database)/documents/shops/$(shopId)).data.ownerId == request.auth.uid;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['uid', 'name', 'email', 'role', 'address', 'location', 'isActive', 'managedShops']) &&
+             data.uid == request.auth.uid &&
+             (data.email == "" || isValidEmail(data.email)) &&
+             data.role in ['customer', 'shopkeeper', 'delivery', 'admin'] &&
+             (!('name' in data) || data.name == null || (data.name is string && data.name.size() < 100)) &&
+             (!('address' in data) || data.address == null || (data.address is string && data.address.size() < 500));
+    }
+
+    function isValidShop(data) {
+      return hasRequiredFields(['ownerId', 'name', 'location']) &&
+             hasOnlyAllowedFields(['id', 'ownerId', 'name', 'category', 'location', 'address', 'rating', 'isActive', 'approved', 'createdAt']) &&
+             (data.ownerId == request.auth.uid || isAdmin()) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.location.lat is number && data.location.lng is number;
+    }
+
+    function isValidProduct(data) {
+      return hasRequiredFields(['shopId', 'name', 'price', 'stock']) &&
+             hasOnlyAllowedFields(['id', 'shopId', 'name', 'category', 'price', 'stock', 'imageUrl', 'description', 'isAvailable']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.price is number && data.price >= 0 &&
+             data.stock is number && data.stock >= 0;
+    }
+
+    function isValidOrder(data) {
+      return hasRequiredFields(['customerId', 'shopId', 'items', 'status', 'totalAmount', 'createdAt']) &&
+             hasOnlyAllowedFields(['id', 'customerId', 'shopId', 'items', 'status', 'totalAmount', 'deliveryFee', 'createdAt', 'riderId', 'customerLocation', 'shopLocation', 'riderLocation']) &&
+             data.customerId is string &&
+             data.shopId is string &&
+             data.status in ['pending', 'accepted', 'preparing', 'out_for_delivery', 'delivered', 'cancelled'] &&
+             data.items is list && data.items.size() > 0 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             (!('customerLocation' in data) || (data.customerLocation.lat is number && data.customerLocation.lng is number)) &&
+             (!('shopLocation' in data) || (data.shopLocation.lat is number && data.shopLocation.lng is number)) &&
+             (!('riderLocation' in data) || (data.riderLocation.lat is number && data.riderLocation.lng is number));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && (request.resource.data.role != 'admin' || isAdmin());
+      allow update: if isOwner(userId) && isValidUser(request.resource.data) && (
+        isAdmin() || 
+        (resource.data.role != 'admin' && request.resource.data.role != 'admin')
+      );
+    }
+
+    match /shops/{shopId} {
+      allow read: if true; // Publicly viewable
+      allow create: if isAuthenticated() && isValidShop(request.resource.data);
+      allow update: if (isShopOwner(shopId) || isAdmin()) && isValidShop(request.resource.data);
+      
+      match /products/{productId} {
+        allow read: if true;
+        allow create: if (isShopOwner(shopId) || isAdmin()) && isValidProduct(request.resource.data);
+        allow update: if (isShopOwner(shopId) || isAdmin()) && isValidProduct(request.resource.data);
+        allow delete: if isShopOwner(shopId) || isAdmin();
+      }
+    }
+
+    match /orders/{orderId} {
+      allow read: if isAuthenticated() && (
+        resource.data.customerId == request.auth.uid || 
+        isShopOwner(resource.data.shopId) ||
+        (resource.data.riderId == request.auth.uid) ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && 
+                    request.resource.data.customerId == request.auth.uid &&
+                    isValidOrder(request.resource.data);
+      allow update: if isAuthenticated() && 
+                    isValidOrder(request.resource.data) && (
+        (resource.data.customerId == request.auth.uid && resource.data.status == 'pending' && request.resource.data.status == 'cancelled') || // Customer can cancel pending order
+        (isShopOwner(resource.data.shopId) && request.resource.data.status in ['accepted', 'preparing', 'out_for_delivery']) || // Shopkeeper updates status
+        ((!('riderId' in resource.data) || resource.data.riderId == request.auth.uid) && request.resource.data.riderId == request.auth.uid && request.resource.data.status in ['preparing', 'out_for_delivery', 'delivered']) || // Rider accepts or updates status
+        isAdmin()
+      );
+    }
+
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}
